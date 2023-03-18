@@ -1,0 +1,420 @@
+#include<M_DEFINE.h>
+#include<FirebaseESP32.h>
+#include <WiFiClient.h>
+#include <PubSubClient.h>
+#include<ArduinoJson.h>
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+#include<OneButton.h>
+//
+#include "WiFi.h"
+#include "EEPROM.h"
+#define LENGTH(x) (strlen(x) + 1)   // length of char string
+#define EEPROM_SIZE 200             // EEPROM size
+String ssid;                        //string variable to store ssid
+String pss;                         //string variable to store password
+//
+//smart cf
+void writeStringToFlash(const char* toStore, int startAddr) {
+  int i = 0;
+  for (; i < LENGTH(toStore); i++) {
+    EEPROM.write(startAddr + i, toStore[i]);
+  }
+  EEPROM.write(startAddr + i, '\0');
+  EEPROM.commit();
+}
+String readStringFromFlash(int startAddr) {
+  char in[128]; // char array of size 128 for reading the stored data 
+  int i = 0;
+  for (; i < 128; i++) {
+    in[i] = EEPROM.read(startAddr + i);
+  }
+  return String(in);
+}
+OneButton btnRst(BTN_RESET_PIN,true);
+void btn_rst_long_press(){
+   writeStringToFlash("", 0); // Reset the SSID
+   writeStringToFlash("", 40); // Reset the Password
+   if(WiFi.status()==WL_CONNECTED){
+    digitalWrite(WF_LED_PIN,LOW);
+   } else  digitalWrite(WF_LED_PIN,HIGH);
+   delay(500);
+  ESP.restart();
+}
+
+void wifi_setup() {
+  Serial.begin(115200);    
+  pinMode(WF_LED_PIN,OUTPUT);         //Init serial
+  if (!EEPROM.begin(EEPROM_SIZE)) { //Init EEPROM
+    Serial.println("failed to init EEPROM");
+    delay(1000);
+  }
+  else
+  {
+    ssid = readStringFromFlash(0); // Read SSID stored at address 0
+    Serial.print("SSID = ");
+    Serial.println(ssid);
+    pss = readStringFromFlash(40); // Read Password stored at address 40
+    Serial.print("psss = ");
+    Serial.println(pss);
+  }
+
+  WiFi.begin(ssid.c_str(), pss.c_str());
+  delay(3000);   // Wait for a while till ESP connects to WiFi
+  
+  if (WiFi.status() != WL_CONNECTED) // if WiFi is not connected
+  {
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.beginSmartConfig();
+    Serial.println("Waiting for SmartConfig.");
+    int wf_now=millis();
+    uint8_t cnt=0;
+    while (!WiFi.smartConfigDone()) {
+      delay(500);
+      cnt++;
+      Serial.print(".");
+       if(cnt>20) break;
+    }
+    if(WiFi.smartConfigDone()){
+    Serial.println("");
+    Serial.println("SmartConfig received.");
+    //Wait for WiFi to connect to AP
+    cnt=0;
+    Serial.println("Waiting for WiFi");
+     while(WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      cnt++;
+       if(cnt>10) break;
+    }
+    if(WiFi.status() == WL_CONNECTED){
+    Serial.println("WiFi Connected.");
+
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // read the connected WiFi SSID and password
+    ssid = WiFi.SSID();
+    pss = WiFi.psk();
+    Serial.print("SSID:");
+    Serial.println(ssid);
+    Serial.print("PSS:");
+    Serial.println(pss);
+    Serial.println("Store SSID & PSS in Flash");
+    writeStringToFlash(ssid.c_str(), 0); // storing ssid at address 0
+    writeStringToFlash(pss.c_str(), 40); // storing pss at address 40
+    }
+    }
+  }else
+  {
+    Serial.println("WiFi Connected");
+  }
+  btnRst.attachLongPressStart(btn_rst_long_press);
+}
+//mqtt
+StaticJsonDocument<250> docIn;
+StaticJsonDocument<250> docOut;
+String jsonDataSend;
+String jsonDataRcv;
+uint32_t mqtt_now;
+
+WiFiClient wifiClient;
+PubSubClient client(wifiClient);
+int mqtt_interval=5000;
+bool fbPub1F=false,fbPub2F=false,fbPub3F=false;
+bool mqtt1PubF=false,mqtt2PubF=false,mqtt3PubF=false;
+void mqtt_setup();
+void mqtt_connect_to_broker();
+void mqtt_callback(char* topic, byte *payload, unsigned int length);
+void mqtt_loop();
+void mqtt_public(char* pubTopic,bool rl);
+//fb
+FirebaseData ledData;
+FirebaseJson json;
+// bool fbChangeState;// flag for firebase
+// bool mqttChangeState;// flag for mqtt
+uint64_t now;
+bool toggle_state(bool s){
+  return !s;
+}
+// btn
+OneButton btn1(BTN1_PIN,false,false);
+OneButton btn2(BTN2_PIN,false,false);
+OneButton btn3(BTN3_PIN,false,false);
+// OneButton btnRst(BTN_RESET_PIN,true);
+// bool smartConfigMode =false;
+// uint32_t tick;
+// void btn_rst_click(){
+//   if(smartConfigMode==true) smartConfigMode=false;
+//   else ESP.restart();
+// }
+// void btn_rst_long_press(){
+//   tick++;
+//   if(tick>3000){
+//     smartConfigMode=true;
+//     while(1)
+//     {digitalWrite(WF_LED_PIN,HIGH);
+//     delay(100);
+//     digitalWrite(WF_LED_PIN,LOW);
+//     delay(100);
+//     }
+//   }
+// }
+bool rl1On=false,rl2On=false,rl3On=false;
+void btn1_on_click(){
+  Serial.println("btn1_ok");
+  rl1On=toggle_state(rl1On);
+  digitalWrite(RL1_PIN,rl1On); 
+ // mqtt_public(MQTT_RL1_PUB,rl1On);
+  mqtt1PubF=true;
+  fbPub1F=true;
+ // Firebase.setBool(ledData,FIREBASE_RL1,rl1On);
+}
+void btn2_on_click(){
+  Serial.println("btn2_ok");
+  rl2On=toggle_state(rl2On);
+  digitalWrite(RL2_PIN,rl2On); 
+ // mqtt_public(MQTT_RL2_PUB,rl2On);
+  mqtt2PubF=true;
+  fbPub2F=true;
+  //Firebase.setBool(ledData,FIREBASE_RL2,rl2On); 
+}
+void btn3_on_click(){
+  Serial.println("btn3_ok");
+  rl3On=toggle_state(rl3On);
+  digitalWrite(RL3_PIN,rl3On);
+ // mqtt_public(MQTT_RL3_PUB,rl3On); 
+    mqtt3PubF=true;
+ // Firebase.setBool(ledData,FIREBASE_RL3,rl3On);   
+   fbPub3F=true;
+}
+void button_loop(){
+  btn1.tick();
+  btn2.tick();
+  btn3.tick();
+  btnRst.tick();
+}
+void button_setup(){
+  btn1.attachClick(btn1_on_click);
+  btn2.attachClick(btn2_on_click);
+  btn3.attachClick(btn3_on_click);
+
+}
+
+/// firebase
+void firebase_setup(){
+  Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
+  Firebase.reconnectWiFi(true);
+  now=millis();
+}
+void firebase_getData(){
+   bool tmp;
+  if(Firebase.getBool(ledData,FIREBASE_RL1)){
+  tmp=ledData.boolData();
+  if(tmp!=rl1On){
+    rl1On=tmp;
+    digitalWrite(RL1_PIN,rl1On);
+    mqtt1PubF=true;
+    //mqtt_public(MQTT_RL1_PUB,rl1On);
+  }
+  }
+  if(Firebase.getBool(ledData,FIREBASE_RL2)){
+  tmp=ledData.boolData();
+  if(tmp!=rl2On){
+    rl2On=tmp;
+    digitalWrite(RL2_PIN,rl2On);
+   // mqttPub1F=true;
+    mqtt2PubF=true;
+   // mqtt_public(MQTT_RL2_PUB,rl2On);
+  }}
+  if(Firebase.getBool(ledData,FIREBASE_RL3)){
+  tmp=ledData.boolData();
+  if(tmp!=rl3On){
+    rl3On=tmp;
+    digitalWrite(RL3_PIN,rl3On);
+   mqtt3PubF=true;
+    //mqtt_public(MQTT_RL1_PUB,rl3On);
+  }}
+}
+void firebase_loop(){
+        if(Firebase.ready()){
+        if(fbPub1F==false && fbPub2F==false && fbPub3F==false){
+        firebase_getData();
+        delay(2000); 
+        } else{
+            if(fbPub1F){
+              if(Firebase.setBool(ledData,FIREBASE_RL1,rl1On)) {fbPub1F=false; Serial.println("s1 ok");}
+              else Serial.println("fb send 1 false");
+          }
+            if(fbPub2F){
+              if(Firebase.setBool(ledData,FIREBASE_RL2,rl2On)) {fbPub2F=false; Serial.println("s2 ok");}
+              else Serial.println("fb send 2 false");
+          }
+            if(fbPub3F){
+              if(Firebase.setBool(ledData,FIREBASE_RL3,rl3On)) {fbPub3F=false; Serial.println("s3 ok");}
+              else Serial.println("fb send 3 false");
+          }
+        }
+      }
+  //   firebase_getData();
+  //   now=millis();
+  // }
+}
+/// mqtt
+void mqtt_setup(){
+  client.setServer(MQTT_SERVER, MQTT_PORT );
+  client.setCallback(mqtt_callback);
+  mqtt_now=millis();
+}
+void mqtt_connect_to_broker(){
+  if (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Create a random client ID
+    String clientId = "ESP32Client-";
+    clientId += String(random(0xffff), HEX);
+    // Attempt to connect
+    if (client.connect(clientId.c_str())) {
+      Serial.println("connected");
+      // Once connected, publish an announcement...
+     // client.publish(MQTT_PUB_SM_SW_R3_TOPIC, "hello world");
+      // ... and resubscribe
+      client.subscribe(MQTT_RL1_SUB);
+      client.subscribe(MQTT_RL2_SUB);
+      client.subscribe(MQTT_RL3_SUB);
+    //  client.subscribe(MQTT_RL2_IN_TOPIC);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+    }
+  }
+}
+
+void mqtt_callback(char* topic, byte *payload, unsigned int length){
+  char* buff=(char*)payload;
+    jsonDataRcv= String(buff);
+    Serial.print("Message arrived [");
+    Serial.print(topic);
+    Serial.print("] ");
+    Serial.println( jsonDataRcv);
+    DeserializationError err =deserializeJson(docIn,jsonDataRcv);
+  // Switch on the LED if an 1 was received as first character
+      if(!err){
+        bool tmp;
+          if(strcmp(topic,MQTT_RL1_SUB)==0){
+             tmp=docIn["ON"];
+             if(tmp!=rl1On){
+              rl1On=tmp;
+              digitalWrite(RL1_PIN,rl1On);
+              fbPub1F=true;
+             // Firebase.setBool(ledData,FIREBASE_RL1,rl1On);
+             }
+          }else if(strcmp(topic,MQTT_RL2_SUB)==0){
+              tmp=docIn["ON"];
+              if(tmp!=rl2On){
+              rl2On=tmp;
+              digitalWrite(RL2_PIN,rl2On);
+              fbPub1F=true;
+              //Firebase.setBool(ledData,FIREBASE_RL2,rl2On);
+             }
+           }else if(strcmp(topic,MQTT_RL3_SUB)==0){
+              tmp=docIn["ON"];
+              if(tmp!=rl3On){
+              rl3On=tmp;
+              digitalWrite(RL3_PIN,rl3On);
+              fbPub1F=true;
+              //Firebase.setBool(ledData,FIREBASE_RL3,rl3On);
+             }
+              }
+    } else{
+        Serial.println("false");
+        Serial.println(err.f_str());
+        }
+}
+void mqtt_loop(){
+  client.loop();
+    if (!client.connected()&& millis()-mqtt_now>mqtt_interval) {
+        mqtt_connect_to_broker();
+        mqtt_now=millis();
+        }
+    client.loop();
+}
+void mqtt_public(char*Topic,bool rl){
+    jsonDataSend="";
+    docOut["ON"]=rl;
+    serializeJson(docOut,jsonDataSend);
+    Serial.println("pub");
+    Serial.println(jsonDataSend);
+    // send mqtt // bool
+     client.publish(Topic,(uint8_t *)jsonDataSend.c_str(), jsonDataSend.length());
+}
+void mqtt_pub_ev(){
+  if(client.connected()){
+  if(mqtt1PubF){
+    mqtt_public(MQTT_RL1_PUB,rl1On); mqtt1PubF=false;
+  }
+  if(mqtt2PubF){
+    mqtt_public(MQTT_RL2_PUB,rl1On); mqtt2PubF=false;
+  }
+  if(mqtt3PubF){
+    mqtt_public(MQTT_RL3_PUB,rl1On); mqtt3PubF=false;
+  }
+}
+}
+// FREERTOS
+//
+// void taskFirebaseSend(void * parameter) {
+//   while (true) 
+// }
+void taskFirebase(void * parameter) {
+  while (true) {
+    if (WiFi.status()==WL_CONNECTED){
+      digitalWrite(WF_LED_PIN,HIGH);
+      mqtt_loop();
+      firebase_loop();
+      //   if(Firebase.ready()){
+      //   if(fbPub1F==false && fbPub2F==false && fbPub3F==false){
+      //   firebase_getData();
+      //   delay(2000); 
+      //   } else{
+      //       if(fbPub1F){
+      //         if(Firebase.setBool(ledData,FIREBASE_RL1,rl1On)) {fbPub1F=false; Serial.println("s1 ok");}
+      //         else Serial.println("fb send 1 false");
+      //     }
+      //       if(fbPub2F){
+      //         if(Firebase.setBool(ledData,FIREBASE_RL2,rl2On)) {fbPub2F=false; Serial.println("s2 ok");}
+      //         else Serial.println("fb send 2 false");
+      //     }
+      //       if(fbPub3F){
+      //         if(Firebase.setBool(ledData,FIREBASE_RL3,rl3On)) {fbPub3F=false; Serial.println("s3 ok");}
+      //         else Serial.println("fb send 3 false");
+      //     }
+      //   }
+      // }
+  }else{
+      WiFi.begin(ssid.c_str(), pss.c_str());
+      digitalWrite(WF_LED_PIN,LOW);
+      delay(2000);
+  }
+}
+}
+void setup() {
+  Serial.begin(115200);
+  button_setup();
+  wifi_setup();
+  mqtt_setup();
+  relay_setup();
+  firebase_setup();
+  xTaskCreatePinnedToCore(taskFirebase, "TaskFirebase", 1024*15, NULL, 1,NULL, 1);
+  //
+  // xTaskCreatePinnedToCore(taskFirebaseSend, "TaskFirebaseSend", 1024*5, NULL, 1,NULL, 1);
+}
+
+void loop() {
+  button_loop();
+  mqtt_pub_ev();
+ // wifi_loop();
+  
+ // firebase_loop();
+
+}
